@@ -4,7 +4,18 @@
 #include "driver/pcnt.h"
 #include "driver/mcpwm.h"
 
+extern "C"
+{
+    void app_main(void);
+}
+
+template <class T>
+T Min(const T a, const T b) { return a < b ? a : b; }
+template <class T>
+T Max(const T a, const T b) { return a > b ? a : b; }
+
 #define MSECOND ((double)1000000)
+#define ACCEPTED_RANGE 2
 
 //1 = 25 - 27 || 13 - 33
 //2 = 12 - 32 || 23 - 5
@@ -43,7 +54,9 @@ uint8_t Motors[MOTORCOUNT][2][2] = {
 
 int64_t lastTime[MOTORCOUNT] = {0};
 double measuredspeed[MOTORCOUNT] = {0};
-double intendedSpeed[MOTORCOUNT] = {0};
+bool speedUpdated[MOTORCOUNT] = {1, 1, 1, 1};
+
+double intendedSpeed[MOTORCOUNT] = {10, 30, 60, 90};
 double currentPwmSpeed[MOTORCOUNT] = {0};
 
 int test = 0;
@@ -57,12 +70,13 @@ static void IRAM_ATTR event(void *arg)
     int pcnt_unit = (int)arg;
 
     uint32_t status = 0;
-    pcnt_get_event_status(pcnt_unit, &status);
+    pcnt_get_event_status((pcnt_unit_t)pcnt_unit, &status);
 
     int8_t direction = status == PCNT_EVT_H_LIM ? 1 : -1;
 
-    measuredspeed[pcnt_unit] = MSECOND / (currentTime - lastTime[pcnt_unit]) * 60 / MOTOR_WHEEL_RATIO * direction;
+    measuredspeed[pcnt_unit] = MSECOND / (currentTime - lastTime[pcnt_unit]) * 60 / MOTOR_WHEEL_RATIO * 2 * direction;
     lastTime[pcnt_unit] = currentTime;
+    speedUpdated[pcnt_unit] = true;
 }
 
 void initPCNT()
@@ -78,31 +92,31 @@ void initPCNT()
             .hctrl_mode = PCNT_MODE_REVERSE,
             .pos_mode = PCNT_COUNT_INC,
             .neg_mode = PCNT_COUNT_DIS,
-            .counter_h_lim = PULSES_PER_MOTOR_ROTATION,
-            .counter_l_lim = -PULSES_PER_MOTOR_ROTATION,
-            .unit = i,
+            .counter_h_lim = PULSES_PER_MOTOR_ROTATION * 2,
+            .counter_l_lim = -PULSES_PER_MOTOR_ROTATION * 2,
+            .unit = (pcnt_unit_t)i,
             .channel = PCNT_CHANNEL_0,
         };
 
         pcnt_unit_config(&config);
 
-        pcnt_counter_pause(i);
-        pcnt_counter_clear(i);
+        pcnt_counter_pause((pcnt_unit_t)i);
+        pcnt_counter_clear((pcnt_unit_t)i);
 
-        pcnt_filter_disable(i);
+        pcnt_filter_disable((pcnt_unit_t)i);
 
         //pcnt_set_event_value(i, PCNT_EVT_)
 
-        pcnt_event_enable(i, PCNT_EVT_H_LIM);
-        pcnt_event_enable(i, PCNT_EVT_L_LIM);
+        pcnt_event_enable((pcnt_unit_t)i, PCNT_EVT_H_LIM);
+        pcnt_event_enable((pcnt_unit_t)i, PCNT_EVT_L_LIM);
     }
 
     pcnt_isr_service_install(0);
 
     for (int i = 0; i < MOTORCOUNT; i++)
     {
-        pcnt_isr_handler_add(i, event, (void *)i);
-        pcnt_counter_resume(i);
+        pcnt_isr_handler_add((pcnt_unit_t)i, event, (void *)i);
+        pcnt_counter_resume((pcnt_unit_t)i);
     }
 }
 
@@ -110,19 +124,19 @@ void initPWM()
 {
     for (int i = 0; i < MOTORCOUNT; i++)
     {
-        mcpwm_unit_t unit = i / 2;
+        mcpwm_unit_t unit = (mcpwm_unit_t)(i / 2);
         int subUnit = i % 2;
-        mcpwm_io_signals_t signalLeft = subUnit * 2;
-        mcpwm_io_signals_t signalRight = subUnit * 2 + 1;
+        mcpwm_io_signals_t signalLeft = (mcpwm_io_signals_t)(subUnit * 2);
+        mcpwm_io_signals_t signalRight = (mcpwm_io_signals_t)(subUnit * 2 + 1);
 
         mcpwm_gpio_init(unit, signalLeft, Motors[i][MOTORPINS][0]);
         mcpwm_gpio_init(unit, signalRight, Motors[i][MOTORPINS][1]);
     }
 
     mcpwm_config_t config;
-    for (mcpwm_unit_t unit = 0; unit < MCPWM_UNIT_MAX; unit++)
+    for (int unit = 0; unit < MCPWM_UNIT_MAX; unit++)
     {
-        for (mcpwm_timer_t timer = 0; timer < 2; timer++)
+        for (int timer = 0; timer < 2; timer++)
         {
             config = (mcpwm_config_t){
                 .frequency = 50,
@@ -132,7 +146,7 @@ void initPWM()
                 .counter_mode = MCPWM_UP_COUNTER,
             };
 
-            mcpwm_init(unit, timer, &config);
+            mcpwm_init((mcpwm_unit_t)unit, (mcpwm_timer_t)timer, &config);
         }
     }
 }
@@ -165,11 +179,16 @@ void writePwmSpeed()
 {
     for (int i = 0; i < MOTORCOUNT; i++)
     {
-        mcpwm_unit_t unit = i / 2;
-        mcpwm_timer_t timer = i % 2;
+        mcpwm_unit_t unit = (mcpwm_unit_t)(i / 2);
+        mcpwm_timer_t timer = (mcpwm_timer_t)(i % 2);
 
         mcpwm_set_duty(unit, timer, MCPWM_GEN_A, currentPwmSpeed[i] > 0 ? currentPwmSpeed[i] : 0);
         mcpwm_set_duty(unit, timer, MCPWM_GEN_B, currentPwmSpeed[i] < 0 ? currentPwmSpeed[i] : 0);
+
+        if (currentPwmSpeed[i] == 0)
+        {
+            measuredspeed[i] = 0;
+        }
     }
 }
 
@@ -185,7 +204,11 @@ void TaskCore1(void *parameters)
         {
             if (time - lastTime[i] > 500000)
             {
+                printf("Oh");
+                fflush(stdout);
+                lastTime[i] = time;
                 measuredspeed[i] = 0;
+                speedUpdated[i] = true;
             }
         }
 
@@ -195,13 +218,53 @@ void TaskCore1(void *parameters)
 
 void TaskCore2(void *parameters)
 {
+    int64_t prev = 0;
     while (true)
     {
+
         for (int i = 0; i < MOTORCOUNT; i++)
         {
-            printf("M%d = %f\n", i, measuredspeed[i]);
+            if (!speedUpdated[i])
+                continue;
+
+            int distance = abs(measuredspeed[i] - intendedSpeed[i]);
+            double distancePercent = (double)distance / intendedSpeed[i] * 100;
+
+            if (distance <= ACCEPTED_RANGE)
+                continue;
+
+            double weight =
+                distancePercent < 10   ? 0.1
+                : distancePercent < 30 ? 1
+                : distancePercent < 60 ? 2
+                                       : 5;
+            weight *= (double)intendedSpeed[i] / 100 * 2;
+
+            if (measuredspeed[i] == 0 && (currentPwmSpeed[i] == 0 || intendedSpeed[i] > 30))
+                weight = 7;
+
+            if (measuredspeed[i] < intendedSpeed[i])
+                currentPwmSpeed[i] += weight;
+            if (measuredspeed[i] > intendedSpeed[i])
+                currentPwmSpeed[i] -= weight;
+
+            if (currentPwmSpeed[i] < -100)
+                currentPwmSpeed[i] = -100;
+            if (currentPwmSpeed[i] > 100)
+                currentPwmSpeed[i] = 100;
+
+            speedUpdated[i] = false;
         }
-        fflush(stdout);
-        vTaskDelay(100);
+
+        if (esp_timer_get_time() - prev > 500000)
+        {
+            for (int i = 0; i < MOTORCOUNT; i++)
+            {
+                printf("M%d = %lf -> %f\n", i, currentPwmSpeed[i], measuredspeed[i]);
+            }
+            fflush(stdout);
+            prev = esp_timer_get_time();
+        }
+        //vTaskDelay(100);
     }
 }

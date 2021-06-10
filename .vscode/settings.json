@@ -16,6 +16,9 @@
     "chrono": "c",
     "random": "c",
     "valarray": "c",
-    "algorithm": "c"
+    "algorithm": "c",
+    "ranges": "c",
+    "iterator": "c",
+    "complex": "c"
   }
 }
